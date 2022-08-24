@@ -96,20 +96,21 @@ class DNSAutoSwitch:
         """
         ping = Ping(ip, port, time_out)
         average = 0
+        ping_text = ''
         try:
             ping.ping(verifi_count)
             ret = ping.result.rows
-            lg.debug(f"Ping {ip}[{port}]结果"
-                     f"成功次数: {ret[0].successed}\n"
-                     f"失败次数: {ret[0].failed}\n"
-                     f"成功率: {ret[0].success_rate}\n"
-                     f"最小延迟: {ret[0].minimum}\n"
-                     f"最大延迟: {ret[0].maximum}\n"
-                     f"平均延迟: {ret[0].average}\n")
+            ping_text = f"Ping {ip}[{port}]结果" \
+                        f"成功次数: {ret[0].successed}\t" \
+                        f"失败次数: {ret[0].failed}\t" \
+                        f"成功率: {ret[0].success_rate}\t" \
+                        f"最小延迟: {ret[0].minimum}\t" \
+                        f"最大延迟: {ret[0].maximum}\t" \
+                        f"平均延迟: {ret[0].average}"
             average = re.findall(r'\d+\.\d+', ret[0].average)[0]
         except:
             lg.error(f"无法连接到 {ip}")
-        return average
+        return average, ping_text
 
     def ip_status(self):
         """
@@ -229,51 +230,124 @@ class DNSAutoSwitch:
         except:
             lg.error(f"修改DNS、网关为 {ip} 异常,原因:\n{traceback.format_exc()}")
 
-    def main(self, open_wrt_ip, default_gateway='0.0.0.0'):
+    def set_port_mapping(self, ports, new_ip):
+        """
+        设置端口映射IP
+        :param ports:
+        :param new_ip:
+        :return:
+        """
+        path = f'/stok={self.stok}/ds'
+        params = {
+            "firewall": {
+                "table": "redirect"
+            },
+            "method": "get"
+        }
+        try:
 
-        if not self.login_status:
-            lg.warning("路由器登陆失败, 可能正在进行重启")
-            return
+            ports = [int(i) for i in ports]
 
-        online_host = self.ip_status()
-        open_wrt_status = False  # OpenWRT服务可用状态
-        update_text = ''  # OpenWRT服务可用状态
-        for ip_info in online_host:
+            resp = requests.post(url=self.url + path, headers=self.headers, json=params).json()
+            if resp.get('error_code') != 0 or not resp.get('firewall'):
+                lg.warning(f"获取端口映射关系失败\n响应:{str(resp)}")
+                return
 
-            for k, v in ip_info.items():
-                if open_wrt_ip in v.get('ip'):
-                    # 获取 OpenWRT IP 延迟
-                    average = float(self.ping(open_wrt_ip, port=80, verifi_count=3, time_out=10))
-                    if average != 0.0 or average <= 100:
-                        update_text = f"OpenWRT IP延迟: {average} ms, 符合阈值 1 - 100ms 范围"
-                        open_wrt_status = True
+            if resp['firewall'].get('redirect'):
+                for i in resp['firewall'].get('redirect'):
+                    for k, v in i.items():
+                        if int(v.get('src_dport_start')) in ports:
+                            new_ip_info = {
+                                "firewall": {
+                                    k: {
+                                        "proto": "all",
+                                        "src_dport_start": int(i[k]['src_dport_start']),
+                                        "src_dport_end": int(i[k]['src_dport_end']),
+                                        "dest_ip": new_ip,
+                                        "dest_port": int(i[k]['dest_port'])
+                                    }
+                                },
+                                "method": "set"
+                            }
 
-        udhcpd = self.get_dns_info()
-        if udhcpd:
-            # OpenWRT服务正常 且 当前路由器网关不为OpenWRT IP
-            if open_wrt_status and open_wrt_ip not in udhcpd.get('gateway'):
-                # 修改网关到OpenWRT
-                lg.info(f"正在修改网关到OpenWRT...")
-                lg.info(f"修改原因: {update_text}")
-                self.set_dns(open_wrt_ip)
-                lg.info(f"修改网关到OpenWRT成功")
-                self.reboot()  # 重启路由器
+                            tmp = requests.post(url=self.url + f'/stok={self.stok}/ds', headers=self.headers, json=new_ip_info).json()
+                            if tmp.get('error_code') == 0:
+                                lg.info(f"端口: {i[k]['src_dport_start']}\t映射IP: {i[k]['dest_ip']} --> {new_ip}\t修改成功")
+                            else:
+                                lg.info(f"端口: {i[k]['src_dport_start']}\t映射IP: {i[k]['dest_ip']} --> {new_ip}\t修改失败,原因:\n{tmp}")
+        except:
+            lg.error(f"设置端口映射IP异常,原因:\n{traceback.format_exc()}")
 
-            # OpenWRT服务异常 且 当前路由器网关 为OpenWRT IP
-            elif not open_wrt_status and open_wrt_ip in udhcpd.get('gateway'):
-                # 还原默认网关
-                lg.info(f"正在还原默认网关...")
-                lg.info(f"修改原因: 未从路由器找到OpenWRT IP")
-                self.set_dns(default_gateway)
-                lg.info(f"还原默认网关成功")
-                self.reboot()  # 重启路由器
+    def main(self, open_wrt_ip, port_mapping, default_gateway='0.0.0.0'):
+        lg.info("开始检查 OpenWRT 状态")
+        try:
+            if not self.login_status:
+                lg.warning("路由器登陆失败, 可能正在进行重启")
+                return
 
-            else:
-                lg.info(f"无需修改")
+            online_host = self.ip_status()
+            open_wrt_status = False  # OpenWRT服务可用状态
+            update_text = ''  # OpenWRT服务可用状态
+            ping_text = ''
+            ip = []
+            for ip_info in online_host:
+
+                for k, v in ip_info.items():
+                    ip.append(v.get('ip'))
+                    if open_wrt_ip in v.get('ip'):
+                        # 获取 OpenWRT IP 延迟
+                        temp_average, ping_text = self.ping(open_wrt_ip, port=80, verifi_count=3, time_out=10)
+                        average = float(temp_average)
+                        if average != 0.0 or average <= 100:
+                            update_text = f"OpenWRT IP延迟: {average} ms, 符合阈值 1 - 100ms 范围"
+                            open_wrt_status = True
+                        else:
+                            update_text = f"OpenWRT IP延迟: {average} ms, 不符合阈值 1 - 100ms 范围"
+                            open_wrt_status = False
+            if not open_wrt_status:
+                if ip.count('192.168.0.107') > 1 and open_wrt_ip not in ip:
+                    lg.info(f"无需修改，由于发现多个 192.168.0.107 数据,当前找到的ip: {'、'.join(ip)}")
+                    return
+                update_text = f"未从路由器找到OpenWRT IP {open_wrt_ip},当前找到的ip: {'、'.join(ip)}"
+
+            udhcpd = self.get_dns_info()
+            if udhcpd:
+                # OpenWRT服务正常 且 当前路由器网关不为OpenWRT IP
+                if open_wrt_status and open_wrt_ip not in udhcpd.get('gateway'):
+                    # 修改端口映射IP
+                    self.set_port_mapping(port_mapping, open_wrt_ip)
+
+                    # 修改网关到OpenWRT
+                    lg.info(f"正在修改网关到OpenWRT...")
+                    if ping_text:
+                        lg.info(ping_text)
+                    lg.info(f"修改原因: {update_text}")
+                    self.set_dns(open_wrt_ip)
+                    lg.info(f"修改网关到OpenWRT成功")
+                    self.reboot()  # 重启路由器
+
+                # OpenWRT服务异常 且 当前路由器网关 为OpenWRT IP
+                elif not open_wrt_status and open_wrt_ip in udhcpd.get('gateway'):
+                    # 还原端口映射IP
+                    self.set_port_mapping(port_mapping, default_gateway)
+
+                    # 还原默认网关
+                    lg.info(f"正在还原默认网关...")
+                    lg.info(f"修改原因: {update_text}")
+                    self.set_dns(default_gateway)
+                    lg.info(f"还原默认网关成功")
+                    self.reboot()  # 重启路由器
+
+                else:
+                    if ping_text:
+                        lg.info(ping_text)
+                    lg.info(f"无需修改")
+        finally:
+            lg.info("完成 OpenWRT 状态检查")
 
 
 if __name__ == '__main__':
-    dns = DNSAutoSwitch('123456')
-    dns.main('192.168.0.130')
+    dns = DNSAutoSwitch('520520520')
+    dns.main('192.168.0.130', port_mapping=['8887', '188', '13389', '13389', '33389', '10888'], default_gateway='192.168.0.1')
 
 
