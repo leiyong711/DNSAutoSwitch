@@ -332,7 +332,7 @@ class DNSAutoSwitch:
                 if ip.count('192.168.0.107') > 1 and self.open_wrt_ip not in ip:
                     lg.info(f"无需修改，由于发现多个 192.168.0.107 数据,当前找到的ip: {'、'.join(ip)}")
                     return
-                update_text = f"未从路由器找到OpenWRT IP {open_wrt_ip},当前找到的ip: {'、'.join(ip)}"
+                update_text = f"未从路由器找到OpenWRT IP {self.open_wrt_ip},当前找到的ip: {'、'.join(ip)}"
 
             udhcpd = self.get_dns_info()
             if udhcpd:
@@ -368,6 +368,8 @@ class DNSAutoSwitch:
                     if ping_text:
                         lg.info(ping_text)
                     lg.info(f"无需修改")
+        except:
+            lg.error(f"检查 OpenWRT 状态异常,原因\n{traceback.format_exc()}")
         finally:
             lg.info("完成 OpenWRT 状态检查")
 
