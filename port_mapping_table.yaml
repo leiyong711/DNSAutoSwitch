@@ -1,0 +1,73 @@
+# 路由器管理员密码
+router_password: 123456
+# 默认网关
+default_gateway: 0.0.0.0
+# openWRT IP
+open_wrt_ip: 192.168.0.130
+# 端口转发映射表
+port_mapping_table:
+  # 外部端口
+  188:
+    # 服务名称
+    name: 可道云网盘
+    # 默认映射
+    default:
+      ip: 192.168.0.107
+      port: 188
+    # 主要映射
+    main_election:
+      ip: 192.168.0.130
+      port: 188
+
+  # 外部端口
+  8887:
+    # 服务名称
+    name: 个人博客
+    # 默认映射
+    default:
+      ip: 192.168.0.107
+      port: 8887
+    # 主要映射
+    main_election:
+      ip: 192.168.0.130
+      port: 8887
+
+  # 外部端口
+  10888:
+    # 服务名称
+    name: Windows Server 2019 宝塔面板
+    # 默认映射
+    default:
+      ip: 192.168.0.107
+      port: 8888
+    # 主要映射
+    main_election:
+      ip: 192.168.0.130
+      port: 10888
+
+  # 外部端口
+  13389:
+    # 服务名称
+    name: Windows Server 2019 远程桌面
+    # 默认映射
+    default:
+      ip: 192.168.0.107
+      port: 3389
+    # 主要映射
+    main_election:
+      ip: 192.168.0.130
+      port: 13389
+
+  # 外部端口
+  23389:
+    # 服务名称
+    name: Windows 10 远程桌面
+    # 默认映射
+    default:
+      ip: 192.168.0.254
+      port: 3389
+    # 主要映射
+    main_election:
+      ip: 192.168.0.130
+      port: 23389
+

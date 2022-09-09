@@ -6,20 +6,29 @@
 # Email: leiyong711@163.com
 
 import re
-import traceback
+import os
+import yaml
 import requests
-from utils.log import lg
+import traceback
 from tcping import Ping
+from utils.log import lg
+from pathlib import Path
+
+BASE_DIR = Path(os.path.dirname(__file__)).parent
 
 
 class DNSAutoSwitch:
 
-    def __init__(self, password):
+    def __init__(self, config_path):
+        self.config = yaml.load(open(config_path, 'r'), Loader=yaml.FullLoader)
+        self.router_password = str(self.config.get('router_password'))  # 路由器管理员密码
+        self.default_gateway = self.config.get('default_gateway')  # 默认网关
+        self.open_wrt_ip = self.config.get('open_wrt_ip')  # openWRT IP
         self.stok = ''
         self.url = "http://tplogin.cn"
         self.key = "RDpbLfCPsJZ7fiv"
         self.long_key = 'yLwVl0zKqws7LgKPRQ84Mdt708T1qQ3Ha7xv3H7NyU84p21BriUWBU43odz3iP4rBL3cD02KZciXTysVXiV8ngg6vL48rPJyAUw0HurW20xqxv9aYb4M9wK1Ae0wlro510qXeU07kV57fQMc8L6aLgMLwygtc0F10a0Dg70TOoouyFhdysuRMO51yY5ZlOZZLEal1h0t9YQW0Ko7oBwmCAHoic4HYbUyVeU3sfQ1xtXcPcf1aT303wAQhv66qzW'
-        self.password = self.password = self.encrypt_passwd(self.key, password, self.long_key)
+        self.password = self.password = self.encrypt_passwd(self.key, self.router_password, self.long_key)
         self.headers = {
             'Accept': 'application/json, text/javascript, */*; q=0.01',
             'Accept-Language': 'zh-CN,zh;q=0.9',
@@ -32,6 +41,8 @@ class DNSAutoSwitch:
         }
         self.login_status = False
         self.login()
+        self.main()
+
 
     def encrypt_passwd(self, a, b, c):
         """
@@ -230,7 +241,7 @@ class DNSAutoSwitch:
         except:
             lg.error(f"修改DNS、网关为 {ip} 异常,原因:\n{traceback.format_exc()}")
 
-    def set_port_mapping(self, ports, new_ip):
+    def set_port_mapping(self, default):
         """
         设置端口映射IP
         :param ports:
@@ -245,9 +256,11 @@ class DNSAutoSwitch:
             "method": "get"
         }
         try:
+            # 获取端口转发配置
+            self.port_mapping_table = self.config.get('port_mapping_table')
+            port_list = [i for i in self.port_mapping_table]
 
-            ports = [int(i) for i in ports]
-
+            # 获取现有端口转发列表
             resp = requests.post(url=self.url + path, headers=self.headers, json=params).json()
             if resp.get('error_code') != 0 or not resp.get('firewall'):
                 lg.warning(f"获取端口映射关系失败\n响应:{str(resp)}")
@@ -256,15 +269,26 @@ class DNSAutoSwitch:
             if resp['firewall'].get('redirect'):
                 for i in resp['firewall'].get('redirect'):
                     for k, v in i.items():
-                        if int(v.get('src_dport_start')) in ports:
+                        src_dport_start = int(v.get('src_dport_start'))
+                        if src_dport_start in port_list:
+                            server_name = self.port_mapping_table[src_dport_start].get('name')
+                            if default:
+                                # 还原默认端口转发
+                                ip = self.port_mapping_table[src_dport_start]['default'].get('ip')
+                                port = self.port_mapping_table[src_dport_start]['default'].get('port')
+                            else:
+                                # 修改端口转发到openWRT
+                                ip = self.port_mapping_table[src_dport_start]['main_election'].get('ip')
+                                port = self.port_mapping_table[src_dport_start]['main_election'].get('port')
+
                             new_ip_info = {
                                 "firewall": {
                                     k: {
                                         "proto": "all",
-                                        "src_dport_start": int(i[k]['src_dport_start']),
-                                        "src_dport_end": int(i[k]['src_dport_end']),
-                                        "dest_ip": new_ip,
-                                        "dest_port": int(i[k]['dest_port'])
+                                        "src_dport_start": src_dport_start,
+                                        "src_dport_end": src_dport_start,
+                                        "dest_ip": ip,
+                                        "dest_port": port
                                     }
                                 },
                                 "method": "set"
@@ -272,13 +296,13 @@ class DNSAutoSwitch:
 
                             tmp = requests.post(url=self.url + f'/stok={self.stok}/ds', headers=self.headers, json=new_ip_info).json()
                             if tmp.get('error_code') == 0:
-                                lg.info(f"端口: {i[k]['src_dport_start']}\t映射IP: {i[k]['dest_ip']} --> {new_ip}\t修改成功")
+                                lg.info(f"端口转发修改成功,服务: {server_name} 外部端口: {src_dport_start},映射IP: {i[k]['dest_ip']}:{i[k]['dest_port']} --> {ip}:{port}")
                             else:
-                                lg.info(f"端口: {i[k]['src_dport_start']}\t映射IP: {i[k]['dest_ip']} --> {new_ip}\t修改失败,原因:\n{tmp}")
+                                lg.info(f"端口转发修改失败,服务: {server_name} 外部端口: {src_dport_start},映射IP: {i[k]['dest_ip']}:{i[k]['dest_port']} --> {ip}:{port}\n原因:\n{tmp}")
         except:
             lg.error(f"设置端口映射IP异常,原因:\n{traceback.format_exc()}")
 
-    def main(self, open_wrt_ip, port_mapping, default_gateway='0.0.0.0'):
+    def main(self):
         lg.info("开始检查 OpenWRT 状态")
         try:
             if not self.login_status:
@@ -294,9 +318,9 @@ class DNSAutoSwitch:
 
                 for k, v in ip_info.items():
                     ip.append(v.get('ip'))
-                    if open_wrt_ip in v.get('ip'):
+                    if self.open_wrt_ip in v.get('ip'):
                         # 获取 OpenWRT IP 延迟
-                        temp_average, ping_text = self.ping(open_wrt_ip, port=80, verifi_count=3, time_out=10)
+                        temp_average, ping_text = self.ping(self.open_wrt_ip, port=80, verifi_count=3, time_out=10)
                         average = float(temp_average)
                         if average != 0.0 or average <= 100:
                             update_text = f"OpenWRT IP延迟: {average} ms, 符合阈值 1 - 100ms 范围"
@@ -305,7 +329,7 @@ class DNSAutoSwitch:
                             update_text = f"OpenWRT IP延迟: {average} ms, 不符合阈值 1 - 100ms 范围"
                             open_wrt_status = False
             if not open_wrt_status:
-                if ip.count('192.168.0.107') > 1 and open_wrt_ip not in ip:
+                if ip.count('192.168.0.107') > 1 and self.open_wrt_ip not in ip:
                     lg.info(f"无需修改，由于发现多个 192.168.0.107 数据,当前找到的ip: {'、'.join(ip)}")
                     return
                 update_text = f"未从路由器找到OpenWRT IP {open_wrt_ip},当前找到的ip: {'、'.join(ip)}"
@@ -313,28 +337,30 @@ class DNSAutoSwitch:
             udhcpd = self.get_dns_info()
             if udhcpd:
                 # OpenWRT服务正常 且 当前路由器网关不为OpenWRT IP
-                if open_wrt_status and open_wrt_ip not in udhcpd.get('gateway'):
+                if open_wrt_status and self.open_wrt_ip not in udhcpd.get('gateway'):
+
                     # 修改端口映射IP
-                    self.set_port_mapping(port_mapping, open_wrt_ip)
+                    self.set_port_mapping(default=False)
 
                     # 修改网关到OpenWRT
                     lg.info(f"正在修改网关到OpenWRT...")
                     if ping_text:
                         lg.info(ping_text)
                     lg.info(f"修改原因: {update_text}")
-                    self.set_dns(open_wrt_ip)
+                    self.set_dns(self.open_wrt_ip)
                     lg.info(f"修改网关到OpenWRT成功")
                     self.reboot()  # 重启路由器
 
                 # OpenWRT服务异常 且 当前路由器网关 为OpenWRT IP
-                elif not open_wrt_status and open_wrt_ip in udhcpd.get('gateway'):
+                elif not open_wrt_status and self.open_wrt_ip in udhcpd.get('gateway'):
+
                     # 还原端口映射IP
-                    self.set_port_mapping(port_mapping, default_gateway)
+                    self.set_port_mapping(default=True)
 
                     # 还原默认网关
                     lg.info(f"正在还原默认网关...")
                     lg.info(f"修改原因: {update_text}")
-                    self.set_dns(default_gateway)
+                    self.set_dns(self.default_gateway)
                     lg.info(f"还原默认网关成功")
                     self.reboot()  # 重启路由器
 
@@ -347,7 +373,6 @@ class DNSAutoSwitch:
 
 
 if __name__ == '__main__':
-    dns = DNSAutoSwitch('520520520')
-    dns.main('192.168.0.130', port_mapping=['8887', '188', '13389', '13389', '33389', '10888'], default_gateway='192.168.0.1')
+    DNSAutoSwitch(config_path=f'{BASE_DIR}/DNSAutoSwitch/port_mapping_table.yaml')
 
 
